@@ -1,0 +1,74 @@
+name: Terraform Azure Backend
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: Select Action
+        required: true
+        default: create
+        type: choice
+        options:
+          - create
+          - delete
+
+env:
+  LOCATION: ${{ fromJson(vars.AZURE_BACKEND_CONFIG).LOCATION }}
+  BACKEND_RESOURCE_GROUP: ${{ fromJson(vars.AZURE_BACKEND_CONFIG).RESOURCE_GROUP }}
+  BACKEND_STORAGE_ACCOUNT: ${{ fromJson(vars.AZURE_BACKEND_CONFIG).STORAGE_ACCOUNT }}
+  BACKEND_HUB_CONTAINER: ${{ fromJson(vars.AZURE_BACKEND_CONFIG).HUB_CONTAINER }}
+  BACKEND_HUB_POST_PROCESS_CONTAINER: ${{ fromJson(vars.AZURE_BACKEND_CONFIG).HUB_POST_PROCESS_CONTAINER }}
+
+jobs:
+  TerraformAzureBackend:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Azure login
+      uses: azure/login@v2
+      with:
+        creds: ${{ secrets.HUB_CREDENTIALS }}
+
+    - name: Terraform Backend Azure Setup
+      env:
+        ACTION: ${{ github.event.inputs.action }}
+      run: |
+        #!/bin/bash
+        
+        TAGS="project=questopshub region=centralus source=manual cost_center=6001 reason=JIRA-12345 created_by=veera-bhadra team=infrateam owner=veera-bhadra"
+
+        if [[ "$ACTION" == "create" ]]; then
+          echo "------------------------"
+          echo  Creating Resource Group
+          echo "------------------------"
+          az group create --name $BACKEND_RESOURCE_GROUP --location $LOCATION --tags $TAGS
+
+          echo "-------------------------"
+          echo  Creating Storage Account
+          echo "-------------------------"
+          az storage account create --name $BACKEND_STORAGE_ACCOUNT --resource-group $BACKEND_RESOURCE_GROUP --location $LOCATION --sku Standard_LRS --tags $TAGS
+
+          echo "----------------------------"
+          echo  Creating Storage Containers
+          echo "----------------------------"
+          containers=(
+            "$BACKEND_HUB_CONTAINER"
+            "$BACKEND_HUB_POST_PROCESS_CONTAINER"
+          )
+
+          for container in "${containers[@]}"; do
+            az storage container create --name "$container" --account-name "$BACKEND_STORAGE_ACCOUNT"
+          done
+
+        elif [[ "$ACTION" == "delete" ]]; then
+          echo "------------------------"
+          echo  Deleting Resource Group
+          echo "------------------------"
+          az group delete --name $BACKEND_RESOURCE_GROUP --yes --no-wait
+
+        else
+          echo "Invalid action. Use 'create' or 'delete'."
+          exit 1
+        fi

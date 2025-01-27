@@ -1,0 +1,52 @@
+---
+    name: Terraform Azure Deployments
+    
+    on:
+      workflow_dispatch:
+        inputs:
+          deployment:
+            description: "Select the Deployment"
+            required: true
+            default: hub
+            type: choice
+            options:
+              - hub
+              - hub-post-process
+          environment:
+            description: "Select the Environment"
+            required: true
+            default: dev
+            type: choice
+            options:
+              - dev
+              - prod
+          command:
+            description: "Select the Command"
+            required: true
+            default: plan
+            type: choice
+            options:
+              - plan
+              - apply
+              - destroy
+    
+    jobs:
+      hub:
+        if: inputs.deployment == 'hub'
+        uses: ./.github/workflows/terraform.yaml
+        secrets: inherit
+        with:
+          deployment: hub
+          environment: ${{ inputs.environment }}
+          command: ${{ inputs.command }}
+          TF_CREDS: HUB_CREDENTIALS
+    
+      hub-post-process:
+        if: inputs.deployment == 'hub-post-process'
+        uses: ./.github/workflows/terraform.yaml
+        secrets: inherit
+        with:
+          deployment: hub-post-process
+          environment: ${{ inputs.environment }}
+          command: ${{ inputs.command }}
+          TF_CREDS: HUB_CREDENTIALS

@@ -1,0 +1,233 @@
+---
+    name: Deployment
+    
+    on:
+      workflow_call:
+        inputs:
+          deployment:
+            required: true
+            type: string
+          environment:
+            required: true
+            type: string
+          command:
+            required: true
+            type: string
+          TF_CREDS:
+            required: true
+            type: string
+    
+    env:
+      ARM_TENANT_ID: ${{ fromJson(secrets.HUB_CREDENTIALS).tenantId }}
+      ARM_SUBSCRIPTION_ID: ${{ fromJson(secrets.HUB_CREDENTIALS).subscriptionId }}
+      ARM_CLIENT_ID: ${{ fromJson(secrets.HUB_CREDENTIALS).clientId }}
+      ARM_CLIENT_SECRET: ${{ fromJson(secrets.HUB_CREDENTIALS).clientSecret }}
+      resource_group_name: ${{ fromJson(vars.AZURE_BACKEND_CONFIG).RESOURCE_GROUP }}
+      storage_account_name: ${{ fromJson(vars.AZURE_BACKEND_CONFIG).STORAGE_ACCOUNT }}
+      hub_container_name: ${{ fromJson(vars.AZURE_BACKEND_CONFIG).HUB_CONTAINER }}
+      hub_post_process_container_name: ${{ fromJson(vars.AZURE_BACKEND_CONFIG).HUB_POST_PROCESS_CONTAINER }}
+      admin_username: ${{ vars.ADMIN_USERNAME }}
+      admin_password: ${{ secrets.ADMIN_PASSWORD }}
+      AKS-Admins_OBJECT_ID: ${{ secrets.AKS_ADMINS_OBJECT_ID }}
+      ACR_NAME: ${{ fromJson(vars.AKS_ACR_CONFIG).ACR_NAME }}
+      AKS_RESOURCE_GROUP_NAME: ${{ fromJson(vars.AKS_ACR_CONFIG).AKS_RESOURCE_GROUP_NAME }}
+      AKS_CLUSTER_NAME: ${{ fromJson(vars.AKS_ACR_CONFIG).AKS_CLUSTER_NAME }}
+    
+    jobs:
+      deployment:
+        runs-on: ubuntu-latest
+        steps:
+          - name: GitHub authentication
+            run: |
+              git config --global url."https://${{ secrets.QUESTOPSHUB_PAT_TOKEN }}@github.com".insteadOf https://github.com
+    
+          - name: Hide secrets
+            run: |
+              echo "::add-mask::$ARM_CLIENT_SECRET"
+              echo "::add-mask::$admin_password"
+          
+          - name: Checkout repository
+            uses: actions/checkout@v4
+    
+          - name: NodeJS setup
+            uses: actions/setup-node@v4
+            with:
+                node-version: 20.x
+    
+          - name: Terraform setup
+            uses: hashicorp/setup-terraform@v3
+            
+          - name: AZCLI setup
+            if: ${{ inputs.deployment == 'hub-post-process' }}
+            run: |
+              sudo apt-get install -y curl apt-transport-https lsb-release gnupg
+              curl -sL https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor | sudo tee /etc/apt/trusted.gpg.d/microsoft.gpg > /dev/null
+              AZ_REPO=$(lsb_release -cs)
+              echo "deb [arch=amd64] https://packages.microsoft.com/repos/azure-cli/ $AZ_REPO main" | sudo tee /etc/apt/sources.list.d/azure-cli.list
+              sudo apt-get update
+              sudo apt-get install -y azure-cli
+    
+          - name: AZCLI login
+            if: ${{ inputs.deployment == 'hub-post-process' }}
+            uses: azure/login@v2
+            with:
+              creds: '{"clientId":"${{ fromJson(secrets[inputs.TF_CREDS]).clientId }}","clientSecret":"${{ fromJson(secrets[inputs.TF_CREDS]).clientSecret }}","subscriptionId":"${{ fromJson(secrets[inputs.TF_CREDS]).subscriptionId }}","tenantId":"${{ fromJson(secrets[inputs.TF_CREDS]).tenantId }}"}'
+          
+          - name: Install 7zip
+            if: ${{ inputs.deployment == 'hub-post-process' }}
+            run: |
+                sudo apt-get update
+                sudo apt-get install -y p7zip-full
+    
+          - name: PowerShell setup
+            if: ${{ inputs.deployment == 'hub-post-process' }}
+            run: |
+              sudo apt-get update
+              sudo apt-get install -y wget apt-transport-https software-properties-common
+              wget -q "https://packages.microsoft.com/config/ubuntu/$(lsb_release -rs)/packages-microsoft-prod.deb"
+              sudo dpkg -i packages-microsoft-prod.deb
+              rm packages-microsoft-prod.deb
+              sudo apt-get update
+              sudo apt-get install -y powershell
+    
+          - uses: azure/use-kubelogin@v1
+            if: ${{ inputs.deployment == 'hub-post-process' }}
+            with:
+              kubelogin-version: "v0.0.24"
+              skip-cache: false
+    
+          - name: AKS credentials setup
+            if: ${{ inputs.deployment == 'hub-post-process' }}
+            run: |
+              az account set --subscription ${{ fromJson(secrets[inputs.TF_CREDS]).subscriptionId }}
+              az aks get-credentials --resource-group ${{ env.AKS_RESOURCE_GROUP_NAME }}  --name ${{ env.AKS_CLUSTER_NAME }} --overwrite-existing
+              kubelogin convert-kubeconfig -l azurecli
+    
+          - name: Terraform hub ${{ inputs.environment }} plan
+            if: ${{ inputs.deployment == 'hub' && inputs.command == 'plan' }}
+            run: |
+              terraform init \
+                -backend-config="resource_group_name=${{ env.resource_group_name }}" \
+                -backend-config="storage_account_name=${{ env.storage_account_name }}" \
+                -backend-config="container_name=${{ env.hub_container_name }}" \
+                -backend-config="key=${{ inputs.environment }}/hub.${{ inputs.environment }}.tfstate"
+    
+              terraform plan \
+                -var subscription_id=${{ fromJson(secrets[inputs.TF_CREDS]).subscriptionId }} \
+                -var client_id=${{ fromJson(secrets[inputs.TF_CREDS]).clientId }} \
+                -var client_secret=${{ fromJson(secrets[inputs.TF_CREDS]).clientSecret }} \
+                -var tenant_id=${{ fromJson(secrets[inputs.TF_CREDS]).tenantId }} \
+                -var admin_username=${{ env.admin_username }} \
+                -var admin_password=${{ env.admin_password }} \
+                -var AKS-Admins_OBJECT_ID=${{ env.AKS-Admins_OBJECT_ID }} \
+                -var-file=${{ github.workspace }}/terraform/vars/${{ inputs.environment }}/hub.tfvars | tee hub-${{ inputs.environment }}.txt
+            working-directory: terraform/deployments/hub
+    
+          - name: Terraform hub ${{ inputs.environment }} apply
+            if: ${{ inputs.deployment == 'hub' && inputs.command == 'apply' }}
+            run: |
+              set -o pipefail
+              set -e
+    
+              terraform init \
+                -backend-config="resource_group_name=${{ env.resource_group_name }}" \
+                -backend-config="storage_account_name=${{ env.storage_account_name }}" \
+                -backend-config="container_name=${{ env.hub_container_name }}" \
+                -backend-config="key=${{ inputs.environment }}/hub.${{ inputs.environment }}.tfstate"
+    
+              terraform apply -auto-approve \
+                -var subscription_id=${{ fromJson(secrets[inputs.TF_CREDS]).subscriptionId }} \
+                -var client_id=${{ fromJson(secrets[inputs.TF_CREDS]).clientId }} \
+                -var client_secret=${{ fromJson(secrets[inputs.TF_CREDS]).clientSecret }} \
+                -var tenant_id=${{ fromJson(secrets[inputs.TF_CREDS]).tenantId }} \
+                -var admin_username=${{ env.admin_username }} \
+                -var admin_password=${{ env.admin_password }} \
+                -var AKS-Admins_OBJECT_ID=${{ env.AKS-Admins_OBJECT_ID }} \
+                -var-file=${{ github.workspace }}/terraform/vars/${{ inputs.environment }}/hub.tfvars | tee hub-${{ inputs.environment }}.txt
+            working-directory: terraform/deployments/hub
+    
+          - name: Terraform hub-post-process ${{ inputs.environment }} plan
+            if: ${{ inputs.deployment == 'hub-post-process' && inputs.command == 'plan' }}
+            run: |
+              terraform init \
+                -backend-config="resource_group_name=${{ env.resource_group_name }}" \
+                -backend-config="storage_account_name=${{ env.storage_account_name }}" \
+                -backend-config="container_name=${{ env.hub_post_process_container_name }}" \
+                -backend-config="key=${{ inputs.environment }}/hub-post-process.${{ inputs.environment }}.tfstate"
+    
+              terraform plan \
+                -var subscription_id=${{ fromJson(secrets[inputs.TF_CREDS]).subscriptionId }} \
+                -var client_id=${{ fromJson(secrets[inputs.TF_CREDS]).clientId }} \
+                -var client_secret=${{ fromJson(secrets[inputs.TF_CREDS]).clientSecret }} \
+                -var tenant_id=${{ fromJson(secrets[inputs.TF_CREDS]).tenantId }} \
+                -var ACR_NAME=${{ env.ACR_NAME }} \
+                -var QUESTOPSHUB_PAT_TOKEN=${{ secrets.QUESTOPSHUB_PAT_TOKEN }} \
+                -var-file=${{ github.workspace }}/terraform/vars/${{ inputs.environment }}/hub-post-process.tfvars | tee hub-post-process-${{ inputs.environment }}.txt
+            working-directory: terraform/deployments/hub-post-process       
+          
+          - name: Terraform hub-post-process ${{ inputs.environment }} apply
+            if: ${{ inputs.deployment == 'hub-post-process' && inputs.command == 'apply' }}
+            run: |
+              set -o pipefail
+              set -e
+    
+              terraform init \
+                -backend-config="resource_group_name=${{ env.resource_group_name }}" \
+                -backend-config="storage_account_name=${{ env.storage_account_name }}" \
+                -backend-config="container_name=${{ env.hub_post_process_container_name }}" \
+                -backend-config="key=${{ inputs.environment }}/hub-post-process.${{ inputs.environment }}.tfstate"
+    
+              terraform apply -auto-approve \
+                -var subscription_id=${{ fromJson(secrets[inputs.TF_CREDS]).subscriptionId }} \
+                -var client_id=${{ fromJson(secrets[inputs.TF_CREDS]).clientId }} \
+                -var client_secret=${{ fromJson(secrets[inputs.TF_CREDS]).clientSecret }} \
+                -var tenant_id=${{ fromJson(secrets[inputs.TF_CREDS]).tenantId }} \
+                -var ACR_NAME=${{ env.ACR_NAME }} \
+                -var QUESTOPSHUB_PAT_TOKEN=${{ secrets.QUESTOPSHUB_PAT_TOKEN }} \
+                -var-file=${{ github.workspace }}/terraform/vars/${{ inputs.environment }}/hub-post-process.tfvars | tee hub-post-process-${{ inputs.environment }}.txt
+            working-directory: terraform/deployments/hub-post-process
+    
+          - name: Print job summary
+            if: ${{ inputs.command != 'destroy' }}
+            uses: sgametrio/terraform-summary-action@main
+            with:
+              log-file: ${{ github.workspace }}/terraform/deployments/${{ inputs.deployment }}/${{ inputs.deployment }}-${{ inputs.environment }}.txt
+    
+          - name: Terraform hub ${{ inputs.environment }} destroy
+            if: ${{ inputs.deployment == 'hub' && inputs.command == 'destroy' }}
+            run: |
+              terraform init \
+                -backend-config="resource_group_name=${{ env.resource_group_name }}" \
+                -backend-config="storage_account_name=${{ env.storage_account_name }}" \
+                -backend-config="container_name=${{ env.hub_container_name }}" \
+                -backend-config="key=${{ inputs.environment }}/hub.${{ inputs.environment }}.tfstate"
+    
+              terraform destroy -auto-approve \
+                -var subscription_id=${{ fromJson(secrets[inputs.TF_CREDS]).subscriptionId }} \
+                -var client_id=${{ fromJson(secrets[inputs.TF_CREDS]).clientId }} \
+                -var client_secret=${{ fromJson(secrets[inputs.TF_CREDS]).clientSecret }} \
+                -var tenant_id=${{ fromJson(secrets[inputs.TF_CREDS]).tenantId }} \
+                -var admin_username=${{ env.admin_username }} \
+                -var admin_password=${{ env.admin_password }} \
+                -var AKS-Admins_OBJECT_ID=${{ env.AKS-Admins_OBJECT_ID }} \
+                -var-file=${{ github.workspace }}/terraform/vars/${{ inputs.environment }}/hub.tfvars
+            working-directory: terraform/deployments/hub
+    
+          - name: Terraform hub-post-process ${{ inputs.environment }} destroy
+            if: ${{ inputs.deployment == 'hub-post-process' && inputs.command == 'destroy' }}
+            run: |
+              terraform init \
+                -backend-config="resource_group_name=${{ env.resource_group_name }}" \
+                -backend-config="storage_account_name=${{ env.storage_account_name }}" \
+                -backend-config="container_name=${{ env.hub_post_process_container_name }}" \
+                -backend-config="key=${{ inputs.environment }}/hub-post-process.${{ inputs.environment }}.tfstate"
+    
+              terraform destroy -auto-approve \
+                -var subscription_id=${{ fromJson(secrets[inputs.TF_CREDS]).subscriptionId }} \
+                -var client_id=${{ fromJson(secrets[inputs.TF_CREDS]).clientId }} \
+                -var client_secret=${{ fromJson(secrets[inputs.TF_CREDS]).clientSecret }} \
+                -var tenant_id=${{ fromJson(secrets[inputs.TF_CREDS]).tenantId }} \
+                -var ACR_NAME=${{ env.ACR_NAME }} \
+                -var QUESTOPSHUB_PAT_TOKEN=${{ secrets.QUESTOPSHUB_PAT_TOKEN }} \
+                -var-file=${{ github.workspace }}/terraform/vars/${{ inputs.environment }}/hub-post-process.tfvars
+            working-directory: terraform/deployments/hub-post-process
