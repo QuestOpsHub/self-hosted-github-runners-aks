@@ -4,12 +4,14 @@ This repository enables the deployment and management of self-hosted GitHub runn
 
 ## 🏗 Architecture
 
-- <img src="images/Architecture.png" alt="Architecture" width="600">
+- <img src="images/Architecture.png" alt="Architecture" width="650">
 
 
 ## 🎯 End Result
 
-- <img src="images/End-Result.png" alt="Architecture" width="600">
+- As shown in the below diagram, runners will be added at the organizational level through a structured and scalable integration process. This approach allows runners to be dynamically assigned based on real-time workload demands, optimizing performance and minimizing downtime.
+
+    - <img src="images/End-Result.png" alt="Architecture" width="650">
 
 ## 🤝 Contributing
 
