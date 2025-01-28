@@ -4,7 +4,7 @@ This repository enables the deployment and management of self-hosted GitHub runn
 
 ## 🏗 Architecture
 
-- <img src="images/Architecture.png" alt="Architecture" width="650">
+
 
 ## 🎯 End Result
 
